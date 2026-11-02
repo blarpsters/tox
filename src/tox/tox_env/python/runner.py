@@ -6,9 +6,10 @@ import logging
 from abc import ABC
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, TypeAlias, get_args
+from typing import TYPE_CHECKING, Final, Literal, TypeAlias, get_args
 
 from packaging.utils import canonicalize_name
+from python_discovery import PythonInfo as InterpreterPythonInfo
 
 from tox.config.types import Command
 from tox.execute import Outcome
@@ -31,9 +32,32 @@ PackageType: TypeAlias = Literal[
 
 
 if TYPE_CHECKING:
+    from python_discovery import MarkerEnvironment
+
     from tox.config.sets import EnvConfigSet
     from tox.tox_env.api import ToxEnvCreateArgs
     from tox.tox_env.package import Package
+
+_PYLOCK_MARKER_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "implementation_name",
+        "implementation_version",
+        "os_name",
+        "platform_machine",
+        "platform_release",
+        "platform_system",
+        "platform_version",
+        "python_full_version",
+        "platform_python_implementation",
+        "python_version",
+        "sys_platform",
+    },
+)
+
+
+def _query_pylock_marker_environment(executable: str | Path) -> MarkerEnvironment | None:
+    discovered = InterpreterPythonInfo.from_exe(str(executable), raise_on_error=False)
+    return None if discovered is None else discovered.marker_environment
 
 
 class PythonRun(Python, RunToxEnv, ABC):
@@ -176,18 +200,40 @@ class PythonRun(Python, RunToxEnv, ABC):
         if not (path := self.core.get("package_root", Path) / pylock_path).exists():
             msg = f"pylock file {pylock_path!r} not found at {path}"
             raise Fail(msg)
-        info = self.base_python
-        marker_env = {
-            "implementation_name": info.impl_lower,
-            "platform_python_implementation": info.implementation,
-            "python_version": info.version_dot,
-            "python_full_version": f"{info.version_info.major}.{info.version_info.minor}.{info.version_info.micro}",
-            "sys_platform": info.platform,
-        }
+        marker_env = self._pylock_marker_environment()
         extras = self.conf.get("extras", set[str])
         groups = self.conf.get("dependency_groups", set[str])
         pylock = Pylock(path=path, extras=frozenset(extras), groups=frozenset(groups), marker_env=marker_env)
         self._install(pylock, PythonRun.__name__, "pylock")
+
+    def _pylock_marker_environment(self) -> dict[str, str]:
+        info = self.base_python
+        marker_env = info.marker_environment
+        if marker_env is None:
+            executable = info.extra.get("executable")
+            if not isinstance(executable, (str, Path)):
+                msg = "cannot determine pylock marker environment: target Python executable is unavailable"
+                raise Fail(msg)
+            marker_env = _query_pylock_marker_environment(executable)
+            if marker_env is None:
+                msg = f"cannot determine pylock marker environment from target Python {executable}"
+                raise Fail(msg)
+
+        missing = sorted(_PYLOCK_MARKER_KEYS.difference(marker_env))
+        invalid = sorted(
+            name for name, value in marker_env.items() if name in _PYLOCK_MARKER_KEYS and not isinstance(value, str)
+        )
+        if missing or invalid:
+            details: list[str] = []
+            if missing:
+                details.append(f"missing values for {', '.join(missing)}")
+            if invalid:
+                details.append(f"non-string values for {', '.join(invalid)}")
+            msg = f"incomplete pylock marker environment for target Python: {'; '.join(details)}"
+            raise Fail(msg)
+        return {
+            name: value for name, value in marker_env.items() if name in _PYLOCK_MARKER_KEYS and isinstance(value, str)
+        }
 
     @override
     def _setup_with_env(self) -> None:

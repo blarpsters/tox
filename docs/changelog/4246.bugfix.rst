@@ -1,0 +1,2 @@
+Evaluate ``pylock.toml`` dependency markers using the complete marker environment of the target Python interpreter,
+querying that interpreter when discovery data is unavailable instead of using marker values from the host.

@@ -15,6 +15,7 @@ from uuid import uuid4
 
 import pytest
 from distlib.scripts import ScriptMaker
+from packaging.markers import default_environment
 from virtualenv import cli_run
 
 from tox.config.cli.parser import Parsed
@@ -126,6 +127,12 @@ def patch_prev_py(mocker: MockerFixture) -> PatchPrevPy:
             major, minor, micro, release_level, serial = sys.version_info
             if base_python[0] == prev_py:
                 minor -= 1
+            marker_environment = default_environment()
+            marker_environment["implementation_name"] = impl
+            marker_environment["implementation_version"] = f"{major}.{minor}.{micro}"
+            marker_environment["platform_python_implementation"] = "CPython" if impl == "cpython" else impl
+            marker_environment["python_full_version"] = f"{major}.{minor}.{micro}"
+            marker_environment["python_version"] = f"{major}.{minor}"
             ver_info = VersionInfo(major, minor, micro, release_level, serial)
             return PythonInfo(
                 implementation=impl,
@@ -137,6 +144,7 @@ def patch_prev_py(mocker: MockerFixture) -> PatchPrevPy:
                 free_threaded=is_free_threaded,
                 debug=is_debug,
                 machine=sysconfig.get_platform().rsplit("-", 1)[-1] or None,
+                marker_environment=marker_environment,
             )
 
         mocker.patch.object(VirtualEnv, "_get_python", get_python)

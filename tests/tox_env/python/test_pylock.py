@@ -3,20 +3,29 @@ from __future__ import annotations
 import re
 import sys
 import tomllib
+from dataclasses import replace
+from pathlib import Path
 from textwrap import dedent
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, cast
+from unittest.mock import MagicMock
 
 import pytest
+from packaging.markers import default_environment
+from python_discovery import PythonInfo as DiscoveryPythonInfo
 
 from tox.tox_env.errors import Fail
+from tox.tox_env.python import runner as python_runner
 from tox.tox_env.python.pylock import Pylock
+from tox.tox_env.python.virtual_env.api import VirtualEnv
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
-    from pathlib import Path
-    from unittest.mock import MagicMock
 
+    from python_discovery import MarkerEnvironment
+
+    from tests.conftest import PatchPrevPy
     from tox.pytest import ToxProject, ToxProjectCreator
+    from tox.tox_env.python.api import PythonInfo
 
 PYLOCK_TOML = dedent("""\
     lock-version = "1.0"
@@ -400,6 +409,181 @@ def test_pylock_filters_by_platform_marker(tox_project: ToxProjectCreator) -> No
     else:
         assert "linuxonly" not in content
         assert "winonly" not in content
+
+
+def test_pylock_filters_by_target_implementation_version(
+    tox_project: ToxProjectCreator,
+    patch_prev_py: PatchPrevPy,
+) -> None:
+    prev_ver, implementation, _ = patch_prev_py(True)
+    if implementation != "cpython":
+        pytest.skip("the mocked previous interpreter shares the host implementation version")
+
+    host_marker_env = default_environment()
+    host_marker_env["implementation_version"] = "99.0"
+    project = tox_project(
+        {
+            "tox.toml": f"""
+            [env_run_base]
+            base_python = "py{prev_ver}"
+            skip_install = true
+            pylock = "pylock.toml"
+            """,
+            "pylock.toml": _render_pylock(
+                "",
+                [
+                    ("demo", "1.0.0", "abc", "implementation_version < '99.0'"),
+                    ("demo", "2.0.0", "def", "implementation_version >= '99.0'"),
+                ],
+            ),
+        },
+    )
+    project.mocker.patch("packaging.markers.default_environment", return_value=host_marker_env)
+    target_probe = project.mocker.patch("tox.tox_env.python.runner._query_pylock_marker_environment")
+
+    def fake_session(env_dir: list[str], **_: object) -> MagicMock:
+        bin_dir = Path(env_dir[0]) / ("Scripts" if sys.platform == "win32" else "bin")
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        session = MagicMock()
+        session.creator.bin_dir = bin_dir
+        session.creator.script_dir = bin_dir
+        return session
+
+    project.mocker.patch(
+        "tox.tox_env.python.virtual_env.api.session_via_cli",
+        side_effect=fake_session,
+    )
+    project.patch_execute()
+
+    result = project.run("r", "-e", "py")
+
+    result.assert_success()
+    assert (project.path / ".tox" / "py" / "pylock.txt").read_text() == "demo==1.0.0 --hash=sha256:abc"
+    target_probe.assert_not_called()
+
+
+def test_pylock_fallback_queries_target_interpreter(
+    tox_project: ToxProjectCreator,
+    patch_prev_py: PatchPrevPy,
+) -> None:
+    patch_prev_py(True)
+    target_interpreter = DiscoveryPythonInfo.from_exe(sys.executable)
+    assert target_interpreter is not None
+    target_marker_env = target_interpreter.marker_environment
+    target_implementation_version = target_marker_env["implementation_version"]
+    original_get_python = VirtualEnv._get_python  # ruff:ignore[private-member-access]
+
+    def without_marker_environment(env: VirtualEnv, base_python: list[str]) -> PythonInfo | None:
+        info = original_get_python(env, base_python)
+        return None if info is None else replace(info, marker_environment=None)
+
+    project = tox_project(
+        {
+            "tox.toml": """
+            [env_run_base]
+            base_python = "py"
+            skip_install = true
+            pylock = "pylock.toml"
+            """,
+            "pylock.toml": _render_pylock(
+                "",
+                [
+                    ("demo", "1.0.0", "abc", f"implementation_version == '{target_implementation_version}'"),
+                    ("demo", "2.0.0", "def", f"implementation_version != '{target_implementation_version}'"),
+                ],
+            ),
+        },
+    )
+    project.mocker.patch.object(VirtualEnv, "_get_python", without_marker_environment)
+    host_marker_env = default_environment()
+    host_marker_env["implementation_version"] = "0.0"
+    project.mocker.patch("packaging.markers.default_environment", return_value=host_marker_env)
+    target_probe = project.mocker.spy(python_runner, "_query_pylock_marker_environment")
+    project.patch_execute()
+
+    result = project.run("r", "-e", "py")
+
+    result.assert_success()
+    assert (project.path / ".tox" / "py" / "pylock.txt").read_text() == "demo==1.0.0 --hash=sha256:abc"
+    target_probe.assert_called_once_with(Path(sys.executable))
+
+
+def test_pylock_fallback_failure_is_reported(
+    tox_project: ToxProjectCreator,
+    patch_prev_py: PatchPrevPy,
+) -> None:
+    patch_prev_py(True)
+    original_get_python = VirtualEnv._get_python  # ruff:ignore[private-member-access]
+
+    def without_marker_environment(env: VirtualEnv, base_python: list[str]) -> PythonInfo | None:
+        info = original_get_python(env, base_python)
+        return None if info is None else replace(info, marker_environment=None)
+
+    project = tox_project(
+        {
+            "tox.toml": """
+            [env_run_base]
+            base_python = "py"
+            skip_install = true
+            pylock = "pylock.toml"
+            """,
+            "pylock.toml": _render_pylock("", [("demo", "1.0.0", "abc", None)]),
+        },
+    )
+    project.mocker.patch.object(VirtualEnv, "_get_python", without_marker_environment)
+    project.mocker.patch("tox.tox_env.python.runner._query_pylock_marker_environment", return_value=None)
+    project.patch_execute()
+
+    result = project.run("r", "-e", "py", raise_on_config_fail=False)
+
+    result.assert_failed()
+    assert "cannot determine pylock marker environment from target Python" in result.out
+
+
+@pytest.mark.parametrize(
+    ("marker_environment", "message"),
+    [
+        pytest.param({}, "missing values for", id="missing-marker-key"),
+        pytest.param(
+            {"implementation_version": 1},
+            "non-string values for implementation_version",
+            id="non-string-marker-value",
+        ),
+    ],
+)
+def test_pylock_rejects_incomplete_marker_environment(
+    tox_project: ToxProjectCreator,
+    patch_prev_py: PatchPrevPy,
+    marker_environment: dict[str, object],
+    message: str,
+) -> None:
+    patch_prev_py(True)
+    original_get_python = VirtualEnv._get_python  # ruff:ignore[private-member-access]
+
+    def with_incomplete_marker_environment(env: VirtualEnv, base_python: list[str]) -> PythonInfo | None:
+        info = original_get_python(env, base_python)
+        return None if info is None else replace(info, marker_environment=cast("MarkerEnvironment", marker_environment))
+
+    project = tox_project(
+        {
+            "tox.toml": """
+            [env_run_base]
+            base_python = "py"
+            skip_install = true
+            pylock = "pylock.toml"
+            """,
+            "pylock.toml": _render_pylock("", [("demo", "1.0.0", "abc", None)]),
+        },
+    )
+    project.mocker.patch.object(VirtualEnv, "_get_python", with_incomplete_marker_environment)
+    target_probe = project.mocker.patch("tox.tox_env.python.runner._query_pylock_marker_environment")
+    project.patch_execute()
+
+    result = project.run("r", "-e", "py", raise_on_config_fail=False)
+
+    result.assert_failed()
+    assert message in result.out
+    target_probe.assert_not_called()
 
 
 def test_pylock_requirements(tmp_path: Path) -> None:
