@@ -4,6 +4,7 @@ import os
 import sys
 from pathlib import Path
 from textwrap import dedent
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, PropertyMock
 
@@ -19,6 +20,7 @@ if TYPE_CHECKING:
     from typing import Final
 
     from pytest_mock import MockerFixture
+    from python_discovery import MarkerEnvironment
 
     from tox.execute import ExecuteRequest
     from tox.pytest import MonkeyPatch, ToxProject, ToxProjectCreator
@@ -61,6 +63,98 @@ def test_virtualenv_default_settings(tox_project: ToxProjectCreator, virtualenv_
     # Older virtualenv parsers retain <0 and append candidates on each parsing pass.
     assert list(dict.fromkeys(spec for spec in virtualenv_opt.python if spec != "<0")) == ["py3"]
     assert list(dict.fromkeys(virtualenv_opt.try_first_with)) == [str(sys.executable), str(proj.path / "a")]
+
+
+def test_virtualenv_preserves_marker_environment(
+    tox_project: ToxProjectCreator,
+    mocker: MockerFixture,
+) -> None:
+    marker_environment: MarkerEnvironment = {
+        "implementation_name": "cpython",
+        "implementation_version": "3.12.4",
+        "os_name": "posix",
+        "platform_machine": "x86_64",
+        "platform_release": "test-release",
+        "platform_system": "Linux",
+        "platform_version": "test-version",
+        "python_full_version": "3.12.4",
+        "platform_python_implementation": "CPython",
+        "python_version": "3.12",
+        "sys_platform": "linux",
+    }
+    interpreter = SimpleNamespace(
+        system_executable=sys.executable,
+        version_info=SimpleNamespace(major=3, minor=12, micro=4, releaselevel="final", serial=0),
+        implementation="CPython",
+        version="3.12.4",
+        architecture=64,
+        platform="linux",
+        free_threaded=False,
+        debug_build=False,
+        machine="x86_64",
+        marker_environment=marker_environment,
+    )
+
+    def fake_session(args: list[str], **_: object) -> MagicMock:
+        env_dir = Path(args[0])
+        creator = SimpleNamespace(
+            interpreter=interpreter,
+            bin_dir=env_dir / "bin",
+            script_dir=env_dir / "bin",
+        )
+        return MagicMock(creator=creator)
+
+    mocker.patch("tox.tox_env.python.virtual_env.api.session_via_cli", side_effect=fake_session)
+    project = tox_project({"tox.toml": "[env_run_base]\npackage = 'skip'"})
+
+    result = project.run("r", "-e", "py")
+
+    result.assert_success()
+    tox_env = result.state.envs["py"]
+    assert isinstance(tox_env, VirtualEnv)
+    assert tox_env.base_python.marker_environment == marker_environment
+
+
+def test_virtualenv_spec_subprocess_preserves_marker_environment(
+    tox_project: ToxProjectCreator,
+    mocker: MockerFixture,
+) -> None:
+    marker_environment: MarkerEnvironment = {
+        "implementation_name": "cpython",
+        "implementation_version": "3.12.4",
+        "os_name": "posix",
+        "platform_machine": "x86_64",
+        "platform_release": "test-release",
+        "platform_system": "Linux",
+        "platform_version": "test-version",
+        "python_full_version": "3.12.4",
+        "platform_python_implementation": "CPython",
+        "python_version": "3.12",
+        "sys_platform": "linux",
+    }
+    resolved = SimpleNamespace(system_executable=sys.executable, marker_environment=marker_environment)
+    mocker.patch("tox.tox_env.python.virtual_env.api.get_interpreter", return_value=resolved)
+    mocker.patch(
+        "tox.tox_env.python.virtual_env.subprocess_adapter.ensure_bootstrap",
+        return_value=Path(sys.executable),
+    )
+    mocker.patch("tox.tox_env.python.virtual_env.subprocess_adapter.SubprocessSession.run")
+    project = tox_project(
+        {
+            "tox.toml": """
+            [env_run_base]
+            package = "skip"
+            virtualenv_spec = "virtualenv>=21.1"
+            """,
+        },
+    )
+
+    result = project.run("r", "-e", "py")
+
+    result.assert_success()
+    tox_env = result.state.envs["py"]
+    assert isinstance(tox_env, VirtualEnv)
+    assert tox_env.base_python.marker_environment == marker_environment
 
 
 def test_virtualenv_flipped_settings(

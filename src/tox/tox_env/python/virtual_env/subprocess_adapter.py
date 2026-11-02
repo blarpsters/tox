@@ -22,6 +22,7 @@ from tox.tox_env.errors import Fail
 
 if TYPE_CHECKING:
     from packaging.specifiers import SpecifierSet
+    from python_discovery import MarkerEnvironment
 
 _PROBE_SCRIPT: Final[str] = """\
 import json, struct, sys, sysconfig
@@ -61,6 +62,7 @@ class SubprocessPythonInfo:
     free_threaded: bool
     debug_build: bool = False
     sysconfig_platform: str | None = None
+    marker_environment: MarkerEnvironment | None = None
 
     @property
     def machine(self) -> str:

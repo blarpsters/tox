@@ -175,6 +175,7 @@ class VirtualEnv(Python, ABC):
             if resolved is None or (executable := resolved.system_executable) is None:
                 continue
             if (interpreter := probe_python(executable)) is not None:
+                interpreter.marker_environment = getattr(resolved, "marker_environment", None)
                 break
         # only pay the bootstrap cost once an interpreter is found; a missing one skips without it
         bootstrap = ensure_bootstrap(self.core.get("work_dir", Path), spec) if interpreter is not None else None
@@ -235,6 +236,7 @@ class VirtualEnv(Python, ABC):
             free_threaded=interpreter.free_threaded,
             debug=interpreter.debug_build,
             machine=getattr(interpreter, "machine", None),
+            marker_environment=getattr(interpreter, "marker_environment", None),
         )
 
     @override
